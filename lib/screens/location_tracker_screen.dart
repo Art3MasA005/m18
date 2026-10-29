@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class LocationTrackerScreen extends StatefulWidget {
   const LocationTrackerScreen({super.key});
@@ -25,6 +26,10 @@ class _LocationTrackerScreenState extends State<LocationTrackerScreen> {
   bool _isSimulatingRoute = false;
   int _simulatedIndex = 0;
 
+  // Selected Destination & Directions state
+  LatLng? _destinationLocation;
+  double? _distanceInMeters;
+
   // Route simulation coordinates matching Dhaka Flyover / Wari from screenshot
   final List<LatLng> _demoDhakaRoute = const [
     LatLng(23.7216771, 90.4165835),
@@ -37,7 +42,9 @@ class _LocationTrackerScreenState extends State<LocationTrackerScreen> {
   ];
 
   static const String _markerIdVal = 'current_location_marker';
+  static const String _destinationMarkerIdVal = 'destination_marker';
   static const String _polylineIdVal = 'tracking_route_polyline';
+  static const String _directionsPolylineIdVal = 'directions_route_polyline';
 
   @override
   void initState() {
@@ -122,7 +129,6 @@ class _LocationTrackerScreenState extends State<LocationTrackerScreen> {
       _animateCameraToLocation(initialLatLng);
     } catch (e) {
       debugPrint('Error getting initial location: $e');
-      // Fallback to initial position if GPS lock is delayed on emulator
       setState(() {
         _currentLocation ??= _initialPosition;
         if (_polylineCoordinates.isEmpty) {
@@ -194,13 +200,103 @@ class _LocationTrackerScreenState extends State<LocationTrackerScreen> {
           _polylineCoordinates.last.longitude != newLatLng.longitude) {
         _polylineCoordinates.add(newLatLng);
       }
+
+      // Update distance if destination is active
+      if (_destinationLocation != null) {
+        _distanceInMeters = Geolocator.distanceBetween(
+          newLatLng.latitude,
+          newLatLng.longitude,
+          _destinationLocation!.latitude,
+          _destinationLocation!.longitude,
+        );
+      }
     });
 
-    // Smooth camera animation to latest position
-    _animateCameraToLocation(newLatLng);
+    // Animate camera to latest position if destination is not in focus
+    if (_destinationLocation == null) {
+      _animateCameraToLocation(newLatLng);
+      _showMarkerInfoWindow();
+    }
+  }
 
-    // Keep InfoWindow displayed
-    _showMarkerInfoWindow();
+  /// Select a destination by tapping on the map
+  void _onMapTapped(LatLng target) {
+    final LatLng current = _currentLocation ?? _initialPosition;
+    final double distance = Geolocator.distanceBetween(
+      current.latitude,
+      current.longitude,
+      target.latitude,
+      target.longitude,
+    );
+
+    setState(() {
+      _destinationLocation = target;
+      _distanceInMeters = distance;
+    });
+
+    _showSnackBar('Destination selected! Tap "Focus Route" or "Get Directions".');
+    _fitRouteBounds(current, target);
+  }
+
+  /// Clear the selected destination
+  void _clearDestination() {
+    setState(() {
+      _destinationLocation = null;
+      _distanceInMeters = null;
+    });
+    if (_currentLocation != null) {
+      _animateCameraToLocation(_currentLocation!);
+    }
+    _showSnackBar('Destination cleared.');
+  }
+
+  /// Fit both current location and destination in map view
+  void _fitRouteBounds(LatLng p1, LatLng p2) {
+    if (_mapController == null) return;
+
+    final double south = p1.latitude < p2.latitude ? p1.latitude : p2.latitude;
+    final double north = p1.latitude > p2.latitude ? p1.latitude : p2.latitude;
+    final double west = p1.longitude < p2.longitude ? p1.longitude : p2.longitude;
+    final double east = p1.longitude > p2.longitude ? p1.longitude : p2.longitude;
+
+    final LatLngBounds bounds = LatLngBounds(
+      southwest: LatLng(south, west),
+      northeast: LatLng(north, east),
+    );
+
+    _mapController!.animateCamera(
+      CameraUpdate.newLatLngBounds(bounds, 100.0),
+    );
+  }
+
+  /// Open turn-by-turn navigation in external Google Maps application
+  Future<void> _openGoogleMapsNavigation() async {
+    if (_destinationLocation == null) return;
+    final LatLng current = _currentLocation ?? _initialPosition;
+
+    final String origin = '${current.latitude},${current.longitude}';
+    final String destination =
+        '${_destinationLocation!.latitude},${_destinationLocation!.longitude}';
+
+    final Uri url = Uri.parse(
+      'https://www.google.com/maps/dir/?api=1&origin=$origin&destination=$destination&travelmode=driving',
+    );
+
+    try {
+      if (await canLaunchUrl(url)) {
+        await launchUrl(url, mode: LaunchMode.externalApplication);
+      } else {
+        // Fallback geo uri
+        final Uri geoUri = Uri.parse('google.navigation:q=$destination&mode=d');
+        if (await canLaunchUrl(geoUri)) {
+          await launchUrl(geoUri, mode: LaunchMode.externalApplication);
+        } else {
+          _showSnackBar('Could not launch Google Maps app.');
+        }
+      }
+    } catch (e) {
+      _showSnackBar('Error opening navigation: $e');
+    }
   }
 
   /// Advance route simulation (useful for testing on emulators where GPS is stationary)
@@ -231,10 +327,13 @@ class _LocationTrackerScreenState extends State<LocationTrackerScreen> {
 
   void _showSnackBar(String message) {
     if (!mounted) return;
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
         duration: const Duration(seconds: 3),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ),
     );
   }
@@ -243,7 +342,7 @@ class _LocationTrackerScreenState extends State<LocationTrackerScreen> {
   Widget build(BuildContext context) {
     final LatLng activeLocation = _currentLocation ?? _initialPosition;
 
-    // Marker with InfoWindow (Task 4)
+    // Markers: Current location marker + Optional Destination marker
     final Set<Marker> markers = {
       Marker(
         markerId: const MarkerId(_markerIdVal),
@@ -254,9 +353,21 @@ class _LocationTrackerScreenState extends State<LocationTrackerScreen> {
         ),
         icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
       ),
+      if (_destinationLocation != null)
+        Marker(
+          markerId: const MarkerId(_destinationMarkerIdVal),
+          position: _destinationLocation!,
+          infoWindow: InfoWindow(
+            title: 'Destination',
+            snippet: _distanceInMeters != null
+                ? '${(_distanceInMeters! / 1000).toStringAsFixed(2)} km away'
+                : '${_destinationLocation!.latitude},${_destinationLocation!.longitude}',
+          ),
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
+        ),
     };
 
-    // Polyline connecting previous and current locations (Task 3)
+    // Polylines: Tracking history + Optional Directions route to Destination
     final Set<Polyline> polylines = {
       if (_polylineCoordinates.length > 1)
         Polyline(
@@ -264,6 +375,20 @@ class _LocationTrackerScreenState extends State<LocationTrackerScreen> {
           points: _polylineCoordinates,
           color: const Color(0xFF1E88E5), // Rich vibrant blue
           width: 6,
+          jointType: JointType.round,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+        ),
+      if (_destinationLocation != null)
+        Polyline(
+          polylineId: const PolylineId(_directionsPolylineIdVal),
+          points: [activeLocation, _destinationLocation!],
+          color: const Color(0xFF7C4DFF), // Vibrant Deep Purple route line
+          width: 5,
+          patterns: [
+            PatternItem.dash(24),
+            PatternItem.gap(12),
+          ],
           jointType: JointType.round,
           startCap: Cap.roundCap,
           endCap: Cap.roundCap,
@@ -283,7 +408,6 @@ class _LocationTrackerScreenState extends State<LocationTrackerScreen> {
         backgroundColor: Colors.blue,
         elevation: 2,
         actions: [
-          // Simulation toggle button for convenient emulator testing
           IconButton(
             tooltip: _isSimulatingRoute ? 'Switch to Real GPS' : 'Simulate Emulator Walk',
             icon: Icon(
@@ -303,8 +427,8 @@ class _LocationTrackerScreenState extends State<LocationTrackerScreen> {
               });
               _showSnackBar(
                 _isSimulatingRoute
-                  ? 'Simulation mode active: Updates every 10s along route'
-                  : 'Real GPS mode active: Polling Geolocator every 10s',
+                    ? 'Simulation mode active: Updates every 10s along route'
+                    : 'Real GPS mode active: Polling Geolocator every 10s',
               );
             },
           ),
@@ -312,7 +436,7 @@ class _LocationTrackerScreenState extends State<LocationTrackerScreen> {
       ),
       body: Stack(
         children: [
-          // Google Map View
+          // Google Map View with onTap destination selection
           GoogleMap(
             initialCameraPosition: CameraPosition(
               target: _initialPosition,
@@ -325,6 +449,7 @@ class _LocationTrackerScreenState extends State<LocationTrackerScreen> {
             zoomControlsEnabled: true,
             compassEnabled: true,
             mapToolbarEnabled: true,
+            onTap: _onMapTapped,
             onMapCreated: (GoogleMapController controller) {
               _mapController = controller;
               if (_currentLocation != null) {
@@ -343,12 +468,12 @@ class _LocationTrackerScreenState extends State<LocationTrackerScreen> {
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                 decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.92),
-                  borderRadius: BorderRadius.circular(12),
+                  color: Colors.white.withValues(alpha: 0.94),
+                  borderRadius: BorderRadius.circular(14),
                   boxShadow: [
                     BoxShadow(
                       color: Colors.black.withValues(alpha: 0.12),
-                      blurRadius: 8,
+                      blurRadius: 10,
                       offset: const Offset(0, 3),
                     ),
                   ],
@@ -356,7 +481,7 @@ class _LocationTrackerScreenState extends State<LocationTrackerScreen> {
                 child: Row(
                   children: [
                     Container(
-                      padding: const EdgeInsets.all(6),
+                      padding: const EdgeInsets.all(8),
                       decoration: BoxDecoration(
                         color: _isSimulatingRoute
                             ? Colors.orange.withValues(alpha: 0.2)
@@ -418,6 +543,154 @@ class _LocationTrackerScreenState extends State<LocationTrackerScreen> {
             ),
           ),
 
+          // Tap Hint Banner when no destination is selected
+          if (_destinationLocation == null)
+            Positioned(
+              top: 76,
+              left: 32,
+              right: 32,
+              child: SafeArea(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.black87.withValues(alpha: 0.75),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: const Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.touch_app, color: Colors.amberAccent, size: 16),
+                      SizedBox(width: 6),
+                      Flexible(
+                        child: Text(
+                          'Tap anywhere on map to set Destination & Direction',
+                          style: TextStyle(color: Colors.white, fontSize: 11.5, fontWeight: FontWeight.w500),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
+          // Bottom Destination & Direction Action Card
+          if (_destinationLocation != null)
+            Positioned(
+              bottom: 24,
+              left: 16,
+              right: 16,
+              child: SafeArea(
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(18),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.18),
+                        blurRadius: 16,
+                        offset: const Offset(0, 6),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(6),
+                            decoration: const BoxDecoration(
+                              color: Color(0xFFE8F5E9),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(
+                              Icons.place,
+                              color: Color(0xFF2E7D32),
+                              size: 24,
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Selected Destination',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 15,
+                                    color: Colors.black87,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  _distanceInMeters != null
+                                      ? '${(_distanceInMeters! / 1000).toStringAsFixed(2)} km away'
+                                      : 'Calculating...',
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF1E88E5),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.close, color: Colors.grey),
+                            tooltip: 'Clear Destination',
+                            onPressed: _clearDestination,
+                          ),
+                        ],
+                      ),
+                      const Divider(height: 18),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              icon: const Icon(Icons.center_focus_strong, size: 18),
+                              label: const Text('Focus Route'),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: Colors.blue.shade800,
+                                side: BorderSide(color: Colors.blue.shade300),
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                              ),
+                              onPressed: () {
+                                _fitRouteBounds(activeLocation, _destinationLocation!);
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              icon: const Icon(Icons.navigation, size: 18),
+                              label: const Text('Start Navigation'),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF2E7D32),
+                                foregroundColor: Colors.white,
+                                elevation: 2,
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                              ),
+                              onPressed: _openGoogleMapsNavigation,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
           // Loading overlay during initial fetch
           if (_isLoading)
             Container(
@@ -447,7 +720,7 @@ class _LocationTrackerScreenState extends State<LocationTrackerScreen> {
         ],
       ),
       floatingActionButton: Padding(
-        padding: const EdgeInsets.only(bottom: 16.0),
+        padding: EdgeInsets.only(bottom: _destinationLocation != null ? 140.0 : 16.0),
         child: FloatingActionButton(
           backgroundColor: Colors.blue,
           foregroundColor: Colors.white,
