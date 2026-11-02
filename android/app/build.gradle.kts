@@ -1,8 +1,25 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
+
+// Keep local credentials outside version control; CI can use an environment secret.
+val localProperties = Properties().apply {
+    val localFile = rootProject.file("local.properties")
+    if (localFile.exists()) {
+        localFile.inputStream().use { load(it) }
+    }
+}
+val mapsApiKey = providers.environmentVariable("MAPS_API_KEY")
+    .orNull?.trim()?.takeIf { it.isNotEmpty() }
+    ?: localProperties.getProperty("MAPS_API_KEY")?.trim()?.takeIf { it.isNotEmpty() }
+    ?: throw GradleException(
+        "Google Maps key is missing. Set MAPS_API_KEY in android/local.properties " +
+            "(ignored by Git) or in the MAPS_API_KEY environment variable."
+    )
 
 android {
     namespace = "com.ostad.m18.real_time_location_tracker"
@@ -23,6 +40,7 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
     }
 
     buildTypes {

@@ -45,3 +45,9 @@ app.*.map.json
 /android/app/release
 *.png.bak
 emulator_screenshot.png
+
+# Local credentials and environment files
+/android/local.properties
+.env
+.env.*
+!.env.example

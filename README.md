@@ -89,7 +89,8 @@ m18/
 ├── android/
 │   ├── app/
 │   │   └── src/main/
-│   │       └── AndroidManifest.xml    # Permissions & Google Maps API Key
+│   │       └── AndroidManifest.xml    # Permissions & Maps key placeholder
+│   ├── local.properties              # Local Maps key (ignored by Git)
 │   └── gradle.properties             # Multi-drive build configurations
 ├── lib/
 │   ├── main.dart                      # App entry point & Material theme
@@ -128,12 +129,27 @@ m18/
    ```
 
 3. **Configure Google Maps API Key:**
-   Ensure your API key is in `android/app/src/main/AndroidManifest.xml`:
-   ```xml
-   <meta-data
-       android:name="com.google.android.geo.API_KEY"
-       android:value="YOUR_GOOGLE_MAPS_API_KEY" />
+   Enable **Maps SDK for Android** in your Google Cloud project. Add your key to
+   `android/local.properties` (create the file if needed, and keep existing SDK paths):
+   ```properties
+   MAPS_API_KEY=YOUR_GOOGLE_MAPS_API_KEY
    ```
+   This file is ignored by Git. The Android build injects the key into the manifest;
+   do not paste credentials into tracked files, screenshots, or commits.
+   CI can provide the `MAPS_API_KEY` environment secret instead (it takes precedence).
+   A missing key stops the build with a setup message rather than producing a broken map.
+
+   Restrict the key to **Android apps** using package name
+   `com.ostad.m18.real_time_location_tracker` and your signing certificate SHA-1,
+   and restrict API access to **Maps SDK for Android**. Find signing fingerprints with
+   `gradlew.bat signingReport` from `android/` on Windows, or `./gradlew signingReport`
+   on macOS/Linux, after configuring the local key. Evaluators building from source
+   should use their own key and signing certificate. The current release build uses
+   the debug signing certificate too.
+
+   Android SDK keys are included in the APK, so Google Cloud application/API
+   restrictions are still required even when the source repository contains no key.
+   See [Google's API security guidance](https://developers.google.com/maps/api-security-best-practices).
 
 4. **Run on connected device or emulator:**
    ```bash
